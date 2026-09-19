@@ -20,7 +20,7 @@ class Engine:
         self.config = AutoConfig.from_pretrained(model_path)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.int8,
             attn_implementation="sdpa",
         )
         self.model.to(self.device)
