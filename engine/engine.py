@@ -44,8 +44,8 @@ class Engine:
             model_path,
             dtype=torch.bfloat16,
             attn_implementation="sdpa",
-            device_map=self.device,
         )
+        self.model.to(self.device)
         self.model.eval()
 
         # Any id works for left padding: those positions are masked out and
@@ -137,7 +137,10 @@ class Engine:
             # would produce a token no one consumes.
             if i + 1 < max_new_tokens:
                 self.mask[:, prompt_len + i] = 1
-                nxt = self._step(tok.unsqueeze(-1), self.mask, next_pos, cache_position)
+                # .clone(): CUDA graphs replay into one static output buffer,
+                # so this would otherwise alias -- and the next launch would
+                # clobber the token we have not yielded yet.
+                nxt = self._step(tok.unsqueeze(-1), self.mask, next_pos, cache_position).clone()
                 next_pos = next_pos + 1
                 cache_position = cache_position + 1
 
@@ -156,6 +159,17 @@ class Engine:
         inductor compilation and CUDA graph capture.
         """
         prompt = [[self.pad_id] * max(1, total_len - 8)] * batch
-        for _ in self.generate(prompt, 8):
-            pass
-        torch.cuda.synchronize()
+        try:
+            for _ in self.generate(prompt, 8):
+                pass
+            torch.cuda.synchronize()
+        except Exception as exc:  # compile/capture failure must not be fatal
+            if not self.compiled:
+                raise
+            print(f"[engine] compile failed, falling back to eager: {exc!r}")
+            self.compiled = False
+            self._step = self._decode_step
+            self.cache = None
+            for _ in self.generate(prompt, 8):
+                pass
+            torch.cuda.synchronize()
