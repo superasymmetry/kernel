@@ -2,6 +2,10 @@
 
 Matches the HF reference numerically: accumulate in fp32, round the
 normalized value to the input dtype, then scale by the weight.
+
+Registered as a torch custom op so `torch.compile` can trace through it
+without a graph break (a graph break would disable CUDA graphs, which
+cost far more than this kernel saves).
 """
 
 import torch
@@ -30,6 +34,7 @@ def _rmsnorm_fwd(
     tl.store(Y + row * stride_y + cols, y.to(Y.dtype.element_ty), mask=mask)
 
 
+@torch.library.custom_op("engine::rmsnorm", mutates_args=())
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     shape = x.shape
     x2d = x.reshape(-1, shape[-1])
@@ -49,8 +54,19 @@ def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
     return y.reshape(shape)
 
 
+@rmsnorm.register_fake
+def _(x, weight, eps):
+    return torch.empty_like(x)
+
+
 def patch_qwen3_rmsnorm() -> None:
-    """Replace Qwen3RMSNorm.forward with the fused kernel."""
+    """Replace Qwen3RMSNorm.forward with the fused kernel.
+
+    Only worth it when running eager. Under `torch.compile` the custom op is
+    opaque, so inductor cannot fuse the norm into the neighbouring residual
+    add / matmul epilogue the way it can with the reference implementation --
+    leave this off when compiling.
+    """
     from transformers.models.qwen3 import modeling_qwen3
 
     def forward(self, hidden_states):
