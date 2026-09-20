@@ -59,14 +59,16 @@ class Engine:
         )
 
         self._cache: StaticCache | None = None
-        self._cache_len = 0
+        self._cache_key: tuple[int, int] | None = None
 
-    def _get_cache(self, cache_len: int) -> StaticCache:
-        # Reuse one cache across calls so the captured graph keeps pointing at
-        # the same storage; only reallocate if a longer run shows up.
-        if self._cache is None or self._cache_len != cache_len:
+    def _get_cache(self, batch: int, cache_len: int) -> StaticCache:
+        # StaticCache binds its batch size on first use, so a call with a
+        # different batch needs a fresh cache -- reset() alone would leave
+        # buffers shaped for the previous batch.
+        key = (batch, cache_len)
+        if self._cache is None or self._cache_key != key:
             self._cache = StaticCache(config=self.config, max_cache_len=cache_len)
-            self._cache_len = cache_len
+            self._cache_key = key
         else:
             self._cache.reset()
         return self._cache
@@ -78,7 +80,7 @@ class Engine:
 
         total = max_len + max_new_tokens
         cache_len = -(-total // CACHE_GRANULARITY) * CACHE_GRANULARITY
-        past = self._get_cache(cache_len)
+        past = self._get_cache(batch, cache_len)
 
         # Build the prompt on the host, then one transfer for each tensor.
         ids = torch.full((batch, max_len), self.pad_id, dtype=torch.long)
